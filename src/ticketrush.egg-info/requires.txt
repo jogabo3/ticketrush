@@ -1,0 +1,10 @@
+psycopg[binary]<4,>=3.2
+pydantic<3,>=2
+fastapi<1,>=0.115
+uvicorn<1,>=0.30
+
+[dev]
+pytest<10,>=8
+ruff>=0.9
+mypy>=1.14
+httpx<1,>=0.28
