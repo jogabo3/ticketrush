@@ -23,10 +23,9 @@ def database_url() -> str:
 
 @pytest.fixture
 def seat_id(database_url: str) -> int:
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 INSERT INTO concerts (
                     artist_name,
                     venue_name,
@@ -41,24 +40,24 @@ def seat_id(database_url: str) -> int:
                 )
                 RETURNING concert_id
                 """,
-                (f"Lifecycle Test {uuid4()}",),
-            )
-            concert = cursor.fetchone()
-            assert concert is not None
+            (f"Lifecycle Test {uuid4()}",),
+        )
+        concert = cursor.fetchone()
+        assert concert is not None
 
-            cursor.execute(
-                """
+        cursor.execute(
+            """
                 INSERT INTO seats (
                     concert_id, section, row_label, seat_number
                 )
                 VALUES (%s, 'TEST', 'A', 1)
                 RETURNING seat_id
                 """,
-                (concert[0],),
-            )
-            seat = cursor.fetchone()
-            assert seat is not None
-            return int(seat[0])
+            (concert[0],),
+        )
+        seat = cursor.fetchone()
+        assert seat is not None
+        return int(seat[0])
 
 
 def test_hold_creates_reservation(
@@ -111,30 +110,28 @@ def test_expired_hold_releases_seat(
     assert result.reservation_id is not None
 
     # Advance expiration deterministically in the test DB.
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 UPDATE reservations
                 SET expires_at = clock_timestamp() - INTERVAL '1 second'
                 WHERE reservation_id = %s
                 """,
-                (result.reservation_id,),
-            )
+            (result.reservation_id,),
+        )
 
     assert service.expire_hold(result.reservation_id) is True
 
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 SELECT status, current_reservation_id
                 FROM seats
                 WHERE seat_id = %s
                 """,
-                (seat_id,),
-            )
-            row = cursor.fetchone()
+            (seat_id,),
+        )
+        row = cursor.fetchone()
 
     assert row == ("AVAILABLE", None)
 
@@ -151,16 +148,15 @@ def test_old_expiration_cannot_release_new_hold(
     )
     assert first.reservation_id is not None
 
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 UPDATE reservations
                 SET expires_at = clock_timestamp() - INTERVAL '1 second'
                 WHERE reservation_id = %s
                 """,
-                (first.reservation_id,),
-            )
+            (first.reservation_id,),
+        )
 
     assert service.expire_hold(first.reservation_id) is True
 
@@ -173,16 +169,15 @@ def test_old_expiration_cannot_release_new_hold(
     # Stale worker retries expiration for Customer A.
     assert service.expire_hold(first.reservation_id) is False
 
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 SELECT status, current_reservation_id
                 FROM seats
                 WHERE seat_id = %s
                 """,
-                (seat_id,),
-            )
-            row = cursor.fetchone()
+            (seat_id,),
+        )
+        row = cursor.fetchone()
 
     assert row == ("HELD", second.reservation_id)
