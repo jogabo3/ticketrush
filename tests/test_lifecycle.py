@@ -7,10 +7,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from ticketrush.lifecycle import (
-    HoldStatus,
-    ReservationLifecycleService,
-)
+from ticketrush.lifecycle import CheckoutStatus, HoldStatus, ReservationLifecycleService
 
 
 @pytest.fixture
@@ -181,3 +178,99 @@ def test_old_expiration_cannot_release_new_hold(
         row = cursor.fetchone()
 
     assert row == ("HELD", second.reservation_id)
+
+def test_checkout_sells_held_seat(
+    database_url: str,
+    seat_id: int,
+) -> None:
+        service = ReservationLifecycleService(database_url)
+
+        hold = service.create_hold(
+            seat_id=seat_id,
+            customer_id="customer-A",
+        )
+        assert hold.reservation_id is not None
+
+        result = service.checkout(
+            reservation_id=hold.reservation_id,
+            customer_id="customer-A",
+        )
+
+        assert result.status == CheckoutStatus.SOLD
+        assert result.purchase_id is not None
+
+        with psycopg.connect(database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status FROM seats WHERE seat_id = %s",
+                    (seat_id,),
+                )
+                assert cursor.fetchone() == ("SOLD",)
+
+def test_checkout_retry_returns_same_purchase(
+    database_url: str,
+    seat_id: int,
+) -> None:
+    service = ReservationLifecycleService(database_url)
+
+    hold = service.create_hold(
+        seat_id=seat_id,
+        customer_id="customer-A",
+    )
+    assert hold.reservation_id is not None
+
+    first = service.checkout(
+        reservation_id=hold.reservation_id,
+        customer_id="customer-A",
+    )
+
+    second = service.checkout(
+        reservation_id=hold.reservation_id,
+        customer_id="customer-A",
+    )
+
+    assert first.status == CheckoutStatus.SOLD
+    assert second.status == CheckoutStatus.SOLD
+    assert first.purchase_id == second.purchase_id
+
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+                SELECT COUNT(*)
+                FROM purchases
+                WHERE reservation_id = %s
+                """,
+            (hold.reservation_id,),
+        )
+        assert cursor.fetchone() == (1,)
+
+def test_expired_hold_cannot_checkout(
+    database_url: str,
+    seat_id: int,
+) -> None:
+    service = ReservationLifecycleService(database_url)
+
+    hold = service.create_hold(
+        seat_id=seat_id,
+        customer_id="customer-A",
+    )
+    assert hold.reservation_id is not None
+
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+                UPDATE reservations
+                SET expires_at =
+                    clock_timestamp() - INTERVAL '1 second'
+                WHERE reservation_id = %s
+                """,
+            (hold.reservation_id,),
+        )
+
+    result = service.checkout(
+        reservation_id=hold.reservation_id,
+        customer_id="customer-A",
+    )
+
+    assert result.status == CheckoutStatus.EXPIRED
+    assert result.purchase_id is None          

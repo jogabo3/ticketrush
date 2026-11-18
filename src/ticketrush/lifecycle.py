@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -12,13 +12,24 @@ class HoldStatus(StrEnum):
     HELD = "held"
     UNAVAILABLE = "unavailable"
 
-
 @dataclass(frozen=True)
 class HoldResult:
     status: HoldStatus
     reservation_id: UUID | None
     seat_id: int
     expires_at: datetime | None
+
+class CheckoutStatus(StrEnum):
+        SOLD = "sold"
+        EXPIRED = "expired"
+        UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class CheckoutResult:
+            status: CheckoutStatus
+            reservation_id: UUID
+            purchase_id: UUID | None
 
 
 class ReservationLifecycleService:
@@ -176,5 +187,174 @@ class ReservationLifecycleService:
                     raise RuntimeError(
                         "Reservation and seat ownership are inconsistent"
                     )
+                return True
 
-        return True
+    def checkout(
+                self,
+                *,
+                reservation_id: UUID,
+                customer_id: str,
+                    ) -> CheckoutResult:
+                        with psycopg.connect(self.database_url) as connection:
+                            with connection.cursor() as cursor:
+                                # Find the seat associated with this reservation.
+                                cursor.execute(
+                                    """
+                                    SELECT seat_id
+                                    FROM reservations
+                                    WHERE reservation_id = %s
+                                    """,
+                                    (reservation_id,),
+                                )
+                                row = cursor.fetchone()
+    
+                                if row is None:
+                                    return CheckoutResult(
+                                        CheckoutStatus.UNAVAILABLE,
+                                        reservation_id,
+                                        None,
+                                    )
+    
+                                seat_id = int(row[0])
+    
+                                # Follow the same seat-first locking order as expiration.
+                                cursor.execute(
+                                    """
+                                    SELECT status, current_reservation_id
+                                    FROM seats
+                                    WHERE seat_id = %s
+                                    FOR UPDATE
+                                    """,
+                                    (seat_id,),
+                                )
+                                seat = cursor.fetchone()
+                                assert seat is not None
+    
+                                # Handle an already completed checkout.
+                                cursor.execute(
+                                    """
+                                    SELECT purchase_id, customer_id
+                                    FROM purchases
+                                    WHERE reservation_id = %s
+                                    """,
+                                    (reservation_id,),
+                                )
+                                existing = cursor.fetchone()
+    
+                                if existing is not None:
+                                    if existing[1] != customer_id:
+                                        return CheckoutResult(
+                                            CheckoutStatus.UNAVAILABLE,
+                                            reservation_id,
+                                            None,
+                                        )
+                                    return CheckoutResult(
+                                        CheckoutStatus.SOLD,
+                                        reservation_id,
+                                        existing[0],
+                                    )
+    
+                                cursor.execute(
+                                    """
+                                    UPDATE reservations
+                                    SET status = 'SOLD'
+                                    WHERE reservation_id = %s
+                                    AND customer_id = %s
+                                    AND status = 'HELD'
+                                    AND expires_at > clock_timestamp()
+                                    RETURNING seat_id
+                                    """,
+                                    (reservation_id, customer_id),
+                                )
+    
+                                updated = cursor.fetchone()
+    
+                                if updated is None:
+                                    cursor.execute(
+                                        """
+                                        SELECT status, expires_at
+                                        FROM reservations
+                                        WHERE reservation_id = %s
+                                        """,
+                                        (reservation_id,),
+                                    )
+                                    reservation = cursor.fetchone()
+    
+                                    expired = (
+                                        reservation is not None
+                                        and (
+                                            reservation[0] == "EXPIRED"
+                                            or (
+                                                reservation[0] == "HELD"
+                                                and reservation[1]
+                                                <= datetime.now(UTC)
+                                            )
+                                        )
+                                    )
+    
+                                    return CheckoutResult(
+                                        CheckoutStatus.EXPIRED
+                                        if expired
+                                        else CheckoutStatus.UNAVAILABLE,
+                                        reservation_id,
+                                        None,
+                                    )
+    
+                                if (
+                                    seat[0] != "HELD"
+                                    or seat[1] != reservation_id
+                                ):
+                                    raise RuntimeError(
+                                        "Reservation and seat ownership disagree"
+                                    )
+    
+                                purchase_id = uuid4()
+    
+                                cursor.execute(
+                                    """
+                                    INSERT INTO purchases (
+                                        purchase_id,
+                                        reservation_id,
+                                        seat_id,
+                                        customer_id
+                                    )
+                                    VALUES (%s, %s, %s, %s)
+                                    """,
+                                    (
+                                        purchase_id,
+                                        reservation_id,
+                                        seat_id,
+                                        customer_id,
+                                    ),
+                                )
+    
+                                cursor.execute(
+                                    """
+                                    UPDATE seats
+                                    SET
+                                        status = 'SOLD',
+                                        held_by = NULL,
+                                        held_at = NULL,
+                                        current_reservation_id = NULL
+                                    WHERE seat_id = %s
+                                    AND current_reservation_id = %s
+                                    AND status = 'HELD'
+                                    """,
+                                    (seat_id, reservation_id),
+                                )
+    
+                                if cursor.rowcount != 1:
+                                    raise RuntimeError(
+                                        "Seat sale transition failed"
+                                    )
+    
+                        return CheckoutResult(
+                            CheckoutStatus.SOLD,
+                            reservation_id,
+                            purchase_id,
+                        )
+
+        
+
+
+
