@@ -26,10 +26,9 @@ def database_url() -> str:
 @pytest.fixture
 def available_seat(database_url: str) -> int:
     """Create isolated inventory for each test."""
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 INSERT INTO concerts (
                     artist_name,
                     venue_name,
@@ -44,14 +43,14 @@ def available_seat(database_url: str) -> int:
                 )
                 RETURNING concert_id
                 """,
-                (f"Test Artist {uuid4()}",),
-            )
+            (f"Test Artist {uuid4()}",),
+        )
 
-            concert_row = cursor.fetchone()
-            assert concert_row is not None
+        concert_row = cursor.fetchone()
+        assert concert_row is not None
 
-            cursor.execute(
-                """
+        cursor.execute(
+            """
                 INSERT INTO seats (
                     concert_id,
                     section,
@@ -61,13 +60,13 @@ def available_seat(database_url: str) -> int:
                 VALUES (%s, 'TEST', 'A', 1)
                 RETURNING seat_id
                 """,
-                (concert_row[0],),
-            )
+            (concert_row[0],),
+        )
 
-            seat_row = cursor.fetchone()
-            assert seat_row is not None
+        seat_row = cursor.fetchone()
+        assert seat_row is not None
 
-            return int(seat_row[0])
+        return int(seat_row[0])
 
 
 def test_one_customer_can_reserve_seat(
@@ -126,18 +125,17 @@ def test_100_concurrent_customers_one_winner(
         == 99
     )
 
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 SELECT status, held_by
                 FROM seats
                 WHERE seat_id = %s
                 """,
-                (available_seat,),
-            )
+            (available_seat,),
+        )
 
-            row = cursor.fetchone()
+        row = cursor.fetchone()
 
     assert row is not None
     assert row[0] == "HELD"

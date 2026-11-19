@@ -29,8 +29,10 @@ class ReservationService:
         seat_id: int,
         customer_id: str,
     ) -> ReservationResult:
-        with psycopg.connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
+         with (
+                psycopg.connect(self.database_url) as connection,
+                connection.cursor() as cursor,
+               ):
                 cursor.execute(
                     """
                     UPDATE seats
