@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 from uuid import uuid4
 
 import psycopg
@@ -183,29 +185,30 @@ def test_checkout_sells_held_seat(
     database_url: str,
     seat_id: int,
 ) -> None:
-        service = ReservationLifecycleService(database_url)
+    service = ReservationLifecycleService(database_url)
+    hold = service.create_hold(
+        seat_id=seat_id,
+        customer_id="customer-A",
+    )
+    assert hold.reservation_id is not None
 
-        hold = service.create_hold(
-            seat_id=seat_id,
-            customer_id="customer-A",
+    result = service.checkout(
+        reservation_id=hold.reservation_id,
+        customer_id="customer-A",
+    )
+    assert result.status == CheckoutStatus.SOLD
+    assert result.purchase_id is not None
+
+    with (
+        psycopg.connect(database_url) as connection,
+        connection.cursor() as cursor,
+    ):
+        cursor.execute(
+            "SELECT status FROM seats WHERE seat_id = %s",
+            (seat_id,),
         )
-        assert hold.reservation_id is not None
+        assert cursor.fetchone() == ("SOLD",)
 
-        result = service.checkout(
-            reservation_id=hold.reservation_id,
-            customer_id="customer-A",
-        )
-
-        assert result.status == CheckoutStatus.SOLD
-        assert result.purchase_id is not None
-
-        with psycopg.connect(database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT status FROM seats WHERE seat_id = %s",
-                    (seat_id,),
-                )
-                assert cursor.fetchone() == ("SOLD",)
 
 def test_checkout_retry_returns_same_purchase(
     database_url: str,
@@ -274,3 +277,125 @@ def test_expired_hold_cannot_checkout(
 
     assert result.status == CheckoutStatus.EXPIRED
     assert result.purchase_id is None          
+
+def test_checkout_and_expiration_cannot_both_win(
+    database_url: str,
+    seat_id: int,
+) -> None:
+    service = ReservationLifecycleService(database_url)
+
+    hold = service.create_hold(
+        seat_id=seat_id,
+        customer_id="customer-A",
+    )
+    assert hold.reservation_id is not None
+
+    # Make the hold eligible for expiration.
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+                UPDATE reservations
+                SET expires_at =
+                    clock_timestamp() - INTERVAL '1 second'
+                WHERE reservation_id = %s
+                """,
+            (hold.reservation_id,),
+        )
+
+    barrier = Barrier(2)
+
+    def attempt_checkout() -> CheckoutStatus:
+        barrier.wait()
+        result = service.checkout(
+            reservation_id=hold.reservation_id,
+            customer_id="customer-A",
+        )
+        return result.status
+
+    def attempt_expiration() -> bool:
+        barrier.wait()
+        return service.expire_hold(
+            hold.reservation_id
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        checkout_future = executor.submit(attempt_checkout)
+        expiration_future = executor.submit(attempt_expiration)
+
+        checkout_status = checkout_future.result()
+        expiration_succeeded = expiration_future.result()
+
+    assert checkout_status != CheckoutStatus.SOLD
+    assert expiration_succeeded is True
+
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+                SELECT
+                    r.status,
+                    s.status
+                FROM reservations r
+                JOIN seats s ON s.seat_id = r.seat_id
+                WHERE r.reservation_id = %s
+                """,
+            (hold.reservation_id,),
+        )
+        state = cursor.fetchone()
+
+        cursor.execute(
+            """
+                SELECT COUNT(*)
+                FROM purchases
+                WHERE reservation_id = %s
+                """,
+            (hold.reservation_id,),
+        )
+        purchase_count = cursor.fetchone()
+
+    assert state == ("EXPIRED", "AVAILABLE")
+    assert purchase_count == (0,)
+
+def test_expiration_cannot_undo_completed_checkout(
+    database_url: str,
+    seat_id: int,
+) -> None:
+    service = ReservationLifecycleService(database_url)
+
+    hold = service.create_hold(
+        seat_id=seat_id,
+        customer_id="customer-A",
+    )
+    assert hold.reservation_id is not None
+
+    checkout = service.checkout(
+        reservation_id=hold.reservation_id,
+        customer_id="customer-A",
+    )
+
+    assert checkout.status == CheckoutStatus.SOLD
+
+    # Simulate a delayed expiration worker.
+    expired = service.expire_hold(
+        hold.reservation_id
+    )
+
+    assert expired is False
+
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+                SELECT
+                    r.status,
+                    s.status
+                FROM reservations r
+                JOIN seats s ON s.seat_id = r.seat_id
+                WHERE r.reservation_id = %s
+                """,
+            (hold.reservation_id,),
+        )
+
+        state = cursor.fetchone()
+
+    assert state == ("SOLD", "SOLD")
+
+    

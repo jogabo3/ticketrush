@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -48,8 +48,10 @@ class ReservationLifecycleService:
 
         reservation_id = uuid4()
 
-        with psycopg.connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
+        with (
+                psycopg.connect(self.database_url) as connection,
+                connection.cursor() as cursor,
+        ):
                 cursor.execute(
                     """
                     SELECT status
@@ -125,8 +127,10 @@ class ReservationLifecycleService:
         )
 
     def expire_hold(self, reservation_id: UUID) -> bool:
-        with psycopg.connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
+          with (
+                psycopg.connect(self.database_url) as connection,
+                connection.cursor() as cursor,
+                ):
                 cursor.execute(
                     """
                     SELECT seat_id
@@ -195,8 +199,10 @@ class ReservationLifecycleService:
                 reservation_id: UUID,
                 customer_id: str,
                     ) -> CheckoutResult:
-                        with psycopg.connect(self.database_url) as connection:
-                            with connection.cursor() as cursor:
+                          with (
+                                psycopg.connect(self.database_url) as connection,
+                                connection.cursor() as cursor,
+                                ):
                                 # Find the seat associated with this reservation.
                                 cursor.execute(
                                     """
@@ -268,18 +274,21 @@ class ReservationLifecycleService:
                                 )
     
                                 updated = cursor.fetchone()
-    
+
                                 if updated is None:
                                     cursor.execute(
                                         """
-                                        SELECT status, expires_at
+                                        SELECT
+                                            status,
+                                            expires_at <= clock_timestamp() AS is_expired
                                         FROM reservations
                                         WHERE reservation_id = %s
                                         """,
                                         (reservation_id,),
                                     )
+
                                     reservation = cursor.fetchone()
-    
+
                                     expired = (
                                         reservation is not None
                                         and (
@@ -287,18 +296,17 @@ class ReservationLifecycleService:
                                             or (
                                                 reservation[0] == "HELD"
                                                 and reservation[1]
-                                                <= datetime.now(UTC)
                                             )
                                         )
                                     )
-    
+
                                     return CheckoutResult(
                                         CheckoutStatus.EXPIRED
                                         if expired
                                         else CheckoutStatus.UNAVAILABLE,
                                         reservation_id,
                                         None,
-                                    )
+    )
     
                                 if (
                                     seat[0] != "HELD"
@@ -348,10 +356,10 @@ class ReservationLifecycleService:
                                         "Seat sale transition failed"
                                     )
     
-                        return CheckoutResult(
-                            CheckoutStatus.SOLD,
-                            reservation_id,
-                            purchase_id,
+                                return CheckoutResult(
+                                    CheckoutStatus.SOLD,
+                                    reservation_id,
+                                    purchase_id,
                         )
 
         
